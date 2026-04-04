@@ -7,6 +7,54 @@ const { generateChatID } = require('../utils/request.js')
 const { getSsxmodItna, getSsxmodItna2 } = require('../utils/ssxmod-manager')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../utils/proxy-helper')
 
+const parseUpstreamImageError = (data) => {
+    try {
+        let payload = data
+
+        if (Array.isArray(payload) && payload.length > 0) {
+            payload = payload[0]
+        }
+
+        if (typeof payload === 'string') {
+            payload = JSON.parse(payload)
+        }
+
+        const errorData = payload?.data
+        if (!errorData) {
+            return null
+        }
+
+        if (errorData.code === 'RateLimited') {
+            const waitHours = errorData.num
+            logger.error(`图片/视频生成额度已用尽，需等待约 ${waitHours || '未知'} 小时`, 'CHAT')
+            return {
+                error: `当前账号的该功能使用次数已达上限。${waitHours ? `请等待约 ${waitHours} 小时后再试。` : ''}`,
+                code: errorData.code,
+                wait_hours: waitHours
+            }
+        }
+
+        return {
+            error: errorData.details || errorData.code || '服务错误，请稍后再试',
+            code: errorData.code
+        }
+    } catch (e) {
+        return null
+    }
+}
+
+const parseUpstreamImageErrorFromText = (text) => {
+    try {
+        if (!text || typeof text !== 'string') {
+            return null
+        }
+
+        return parseUpstreamImageError(JSON.parse(text))
+    } catch (e) {
+        return null
+    }
+}
+
 /**
  * 主要的聊天完成处理函数
  * @param {object} req - Express 请求对象
@@ -21,7 +69,9 @@ const handleImageVideoCompletion = async (req, res) => {
 
         // 请求体模板
         const reqBody = {
-            "stream": false,
+            "stream": true,
+            "version": "2.1",
+            "incremental_output": true,
             "chat_id": null,
             "model": model,
             "messages": [
@@ -129,16 +179,20 @@ const handleImageVideoCompletion = async (req, res) => {
         if (chat_type == 't2i' || chat_type == 't2v') {
             // 获取图片尺寸，优先级 参数 > 提示词 > 默认
             if (size != undefined && size != null) {
-                reqBody.size = "1:1"
-            } else if (_userPrompt.indexOf("@4:3") != -1) {
+                reqBody.size = size
+            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@4:3") != -1) {
                 reqBody.size = "4:3"//"1024*768"
-            } else if (_userPrompt.indexOf("@3:4") != -1) {
+            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@3:4") != -1) {
                 reqBody.size = "3:4"//"768*1024"
-            } else if (_userPrompt.indexOf("@16:9") != -1) {
+            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@16:9") != -1) {
                 reqBody.size = "16:9"//"1280*720"
-            } else if (_userPrompt.indexOf("@9:16") != -1) {
+            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@9:16") != -1) {
                 reqBody.size = "9:16"//"720*1280"
             }
+        }
+
+        if (chat_type == 't2v') {
+            reqBody.stream = false
         }
 
         const chatBaseUrl = getChatBaseUrl()
@@ -171,7 +225,7 @@ const handleImageVideoCompletion = async (req, res) => {
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Cookie": `ssxmod_itna=${getSsxmodItna()};ssxmod_itna2=${getSsxmodItna2()}`,
             },
-            responseType: newChatType == 't2i' ? 'stream' : 'json',
+            responseType: newChatType == 't2v' ? 'json' : 'stream',
             timeout: 1000 * 60 * 5
         }
 
@@ -185,26 +239,46 @@ const handleImageVideoCompletion = async (req, res) => {
 
         try {
             let contentUrl = null
-            if (newChatType == 't2i') {
+            if (newChatType == 't2i' || newChatType == 'image_edit') {
                 const decoder = new TextDecoder('utf-8')
+                let buffer = ''
+                let rawText = ''
                 response_data.data.on('data', async (chunk) => {
-                    const data = decoder.decode(chunk, { stream: true }).split('\n').filter(item => item.trim() != "")
-                    console.log(data)
-                    for (const item of data) {
-                        const jsonObj = JSON.parse(item.replace("data:", '').trim())
-                        if (jsonObj && jsonObj.choices && jsonObj.choices[0] && jsonObj.choices[0].delta && jsonObj.choices[0].delta.content.trim() != "" && contentUrl == null) {
-                            contentUrl = jsonObj.choices[0].delta.content
+                    const decoded = decoder.decode(chunk, { stream: true })
+                    rawText += decoded
+                    buffer += decoded
+                    const events = buffer.split('\n\n')
+                    buffer = events.pop() || ''
+
+                    for (const event of events) {
+                        const dataLine = event.split('\n').find(item => item.trim().startsWith('data:'))
+                        if (!dataLine) {
+                            continue
+                        }
+
+                        const payload = dataLine.replace(/^data:\s*/, '').trim()
+                        if (!payload) {
+                            continue
+                        }
+
+                        try {
+                            const jsonObj = JSON.parse(payload)
+                            if (jsonObj && jsonObj.choices && jsonObj.choices[0] && jsonObj.choices[0].delta && typeof jsonObj.choices[0].delta.content === 'string' && jsonObj.choices[0].delta.content.trim() != "" && contentUrl == null) {
+                                contentUrl = jsonObj.choices[0].delta.content
+                            }
+                        } catch (e) {
+                            logger.error('图片SSE解析失败', 'CHAT', '', e)
                         }
                     }
                 })
 
                 response_data.data.on('end', () => {
+                    const upstreamError = parseUpstreamImageErrorFromText(rawText.trim())
+                    if (upstreamError) {
+                        return res.status(429).json(upstreamError)
+                    }
                     return returnResponse(res, model, contentUrl, req.body.stream)
                 })
-            } else if (newChatType == 'image_edit') {
-                console.log(response_data.data)
-                contentUrl = response_data.data?.data?.choices[0]?.message?.content[0]?.image
-                return returnResponse(res, model, contentUrl, req.body.stream)
             } else if (newChatType == 't2v') {
                 return handleVideoCompletion(req, res, response_data.data, token)
             }
@@ -215,6 +289,11 @@ const handleImageVideoCompletion = async (req, res) => {
         }
 
     } catch (error) {
+        const upstreamError = parseUpstreamImageError(error.response?.data)
+        if (upstreamError) {
+            return res.status(429).json(upstreamError)
+        }
+
         res.status(500).json({
             error: "服务错误，请稍后再试"
         })
@@ -256,6 +335,11 @@ const returnResponse = (res, model, contentUrl, stream) => {
 
 const handleVideoCompletion = async (req, res, response_data, token) => {
     try {
+        const upstreamError = parseUpstreamImageError(response_data)
+        if (upstreamError) {
+            return res.status(429).json(upstreamError)
+        }
+
         const videoTaskID = response_data?.data?.messages[0]?.extra?.wanx?.task_id
         if (!response_data || !response_data.success || !videoTaskID) {
             throw new Error()
@@ -283,6 +367,7 @@ const handleVideoCompletion = async (req, res, response_data, token) => {
         const maxAttempts = 60
         // 设置每次请求的间隔时间
         const delay = 20 * 1000
+        let headersInitialized = false
         // 循环尝试获取任务状态
         for (let i = 0; i < maxAttempts; i++) {
             const content = await getVideoTaskStatus(videoTaskID, token)
@@ -295,7 +380,10 @@ ${content}
 [Download Video](${content})
 `
                 // 设置响应头
-                setResponseHeaders(res, req.body.stream)
+                if (!headersInitialized && !res.headersSent) {
+                    setResponseHeaders(res, req.body.stream)
+                    headersInitialized = true
+                }
 
                 if (req.body.stream) {
                     res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
@@ -307,6 +395,10 @@ ${content}
                 return
             } else if (content == null && req.body.stream) {
                 // 发送空数据保活
+                if (!headersInitialized && !res.headersSent) {
+                    setResponseHeaders(res, req.body.stream)
+                    headersInitialized = true
+                }
                 res.write(`data: ${JSON.stringify(returnBody)}\n\n`)
             }
 

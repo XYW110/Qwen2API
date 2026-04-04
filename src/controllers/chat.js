@@ -29,6 +29,20 @@ const setResponseHeaders = (res, stream) => {
     }
 }
 
+const getImageMarkdownListFromDelta = (delta) => {
+    // 常规聊天在触发 image_gen_tool 时，仅使用 image_list 中用于展示的图片链接
+    const imageList = []
+    const displayImages = delta?.extra?.image_list || []
+
+    for (const item of displayImages) {
+        if (item?.image) {
+            imageList.push(`![image](${item.image})`)
+        }
+    }
+
+    return imageList
+}
+
 /**
  * 处理流式响应
  * @param {object} res - Express 响应对象
@@ -45,6 +59,8 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
         let thinking_start = false
         let thinking_end = false
         let buffer = ''
+        let emittedImageMarkdownSet = new Set()
+        let pendingImageMarkdownList = []
 
         // Token消耗量统计
         let totalTokens = {
@@ -109,20 +125,58 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
                         }
                     }
 
+                    const delta = decodeJson.choices[0].delta
+
                     // 处理 web_search 信息
-                    if (decodeJson.choices[0].delta && decodeJson.choices[0].delta.name === 'web_search') {
-                        web_search_info = decodeJson.choices[0].delta.extra.web_search_info
+                    if (delta && delta.name === 'web_search') {
+                        web_search_info = delta.extra.web_search_info
                     }
 
-                    if (!decodeJson.choices[0].delta || !decodeJson.choices[0].delta.content ||
-                        (decodeJson.choices[0].delta.phase !== 'think' && decodeJson.choices[0].delta.phase !== 'answer')) {
+                    const imageMarkdownList = getImageMarkdownListFromDelta(delta)
+                    if (imageMarkdownList.length > 0) {
+                        const newImageMarkdownList = imageMarkdownList.filter(item => !emittedImageMarkdownSet.has(item))
+
+                        // 如果仍处于思考块内，则先缓存图片，等 </think> 输出后再插入，避免被客户端折叠
+                        if (thinking_start && !thinking_end) {
+                            for (const imageMarkdown of newImageMarkdownList) {
+                                if (!pendingImageMarkdownList.includes(imageMarkdown)) {
+                                    pendingImageMarkdownList.push(imageMarkdown)
+                                }
+                            }
+                        } else if (newImageMarkdownList.length > 0) {
+                            // 将图片工具结果转换成普通聊天内容，兼容下游仅识别 OpenAI 文本增量的场景
+                            const imageContent = `${newImageMarkdownList.join('\n\n')}\n\n`
+                            completionContent += imageContent
+                            newImageMarkdownList.forEach(item => emittedImageMarkdownSet.add(item))
+
+                            const streamImageTemplate = {
+                                "id": `chatcmpl-${message_id}`,
+                                "object": "chat.completion.chunk",
+                                "created": new Date().getTime(),
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "content": imageContent
+                                        },
+                                        "finish_reason": null
+                                    }
+                                ]
+                            }
+
+                            res.write(`data: ${JSON.stringify(streamImageTemplate)}\n\n`)
+                        }
+                    }
+
+                    if (!delta || !delta.content ||
+                        (delta.phase !== 'think' && delta.phase !== 'answer')) {
                         continue
                     }
 
-                    let content = decodeJson.choices[0].delta.content
-                    completionContent += content // 累计完整内容用于token估算
+                    let content = delta.content
+                    completionContent += content // 累计完整的回复内容用于token估算
 
-                    if (decodeJson.choices[0].delta.phase === 'think' && !thinking_start) {
+                    if (delta.phase === 'think' && !thinking_start) {
                         thinking_start = true
                         if (web_search_info) {
                             content = `<think>\n\n${await accountManager.generateMarkdownTable(web_search_info, config.searchInfoMode)}\n\n${content}`
@@ -130,9 +184,17 @@ const handleStreamResponse = async (res, response, enable_thinking, enable_web_s
                             content = `<think>\n\n${content}`
                         }
                     }
-                    if (decodeJson.choices[0].delta.phase === 'answer' && !thinking_end && thinking_start) {
+                    if (delta.phase === 'answer' && !thinking_end && thinking_start) {
                         thinking_end = true
-                        content = `\n\n</think>\n${content}`
+                        if (pendingImageMarkdownList.length > 0) {
+                            const pendingImageContent = `${pendingImageMarkdownList.join('\n\n')}\n\n`
+                            content = `\n\n</think>\n${pendingImageContent}${content}`
+                            completionContent += pendingImageContent
+                            pendingImageMarkdownList.forEach(item => emittedImageMarkdownSet.add(item))
+                            pendingImageMarkdownList = []
+                        } else {
+                            content = `\n\n</think>\n${content}`
+                        }
                     }
 
                     const StreamTemplate = {
@@ -246,6 +308,8 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
         let web_search_info = null
         let thinking_start = false
         let thinking_end = false
+        let appendedImageMarkdownSet = new Set()
+        let pendingImageMarkdownList = []
 
         // Token消耗量统计
         let totalTokens = {
@@ -310,20 +374,40 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
                             }
                         }
 
+                        const delta = decodeJson.choices[0].delta
+
                         // 处理 web_search 信息
-                        if (decodeJson.choices[0].delta && decodeJson.choices[0].delta.name === 'web_search') {
-                            web_search_info = decodeJson.choices[0].delta.extra.web_search_info
+                        if (delta && delta.name === 'web_search') {
+                            web_search_info = delta.extra.web_search_info
                         }
 
-                        if (!decodeJson.choices[0].delta || !decodeJson.choices[0].delta.content ||
-                            (decodeJson.choices[0].delta.phase !== 'think' && decodeJson.choices[0].delta.phase !== 'answer')) {
+                        const imageMarkdownList = getImageMarkdownListFromDelta(delta)
+                        if (imageMarkdownList.length > 0) {
+                            const newImageMarkdownList = imageMarkdownList.filter(item => !appendedImageMarkdownSet.has(item))
+
+                            // 非流式模式下如果仍处于思考块内，则延后到 </think> 后再追加图片
+                            if (thinking_start && !thinking_end) {
+                                for (const imageMarkdown of newImageMarkdownList) {
+                                    if (!pendingImageMarkdownList.includes(imageMarkdown)) {
+                                        pendingImageMarkdownList.push(imageMarkdown)
+                                    }
+                                }
+                            } else if (newImageMarkdownList.length > 0) {
+                                // 非流式模式下同样追加 Markdown 图片链接，保持与现有图片返回格式一致
+                                fullContent += `${newImageMarkdownList.join('\n\n')}\n\n`
+                                newImageMarkdownList.forEach(item => appendedImageMarkdownSet.add(item))
+                            }
+                        }
+
+                        if (!delta || !delta.content ||
+                            (delta.phase !== 'think' && delta.phase !== 'answer')) {
                             continue
                         }
 
-                        let content = decodeJson.choices[0].delta.content
+                        let content = delta.content
 
                         // 处理thinking模式
-                        if (decodeJson.choices[0].delta.phase === 'think' && !thinking_start) {
+                        if (delta.phase === 'think' && !thinking_start) {
                             thinking_start = true
                             if (web_search_info) {
                                 const webSearchTable = await accountManager.generateMarkdownTable(web_search_info, config.searchInfoMode)
@@ -332,9 +416,15 @@ const handleNonStreamResponse = async (res, response, enable_thinking, enable_we
                                 content = `<think>\n\n${content}`
                             }
                         }
-                        if (decodeJson.choices[0].delta.phase === 'answer' && !thinking_end && thinking_start) {
+                        if (delta.phase === 'answer' && !thinking_end && thinking_start) {
                             thinking_end = true
-                            content = `\n\n</think>\n${content}`
+                            if (pendingImageMarkdownList.length > 0) {
+                                content = `\n\n</think>\n${pendingImageMarkdownList.join('\n\n')}\n\n${content}`
+                                pendingImageMarkdownList.forEach(item => appendedImageMarkdownSet.add(item))
+                                pendingImageMarkdownList = []
+                            } else {
+                                content = `\n\n</think>\n${content}`
+                            }
                         }
 
                         fullContent += content
