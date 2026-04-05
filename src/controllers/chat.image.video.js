@@ -19,21 +19,23 @@ const parseUpstreamImageError = (data) => {
             payload = JSON.parse(payload)
         }
 
-        const errorData = payload?.data
-        if (!errorData) {
+        // 只有明确 success=false 且带错误码时，才按上游错误包处理，避免误伤正常业务响应
+        if (!payload || payload.success !== false || !payload.data?.code) {
             return null
         }
 
+        const errorData = payload.data
         if (errorData.code === 'RateLimited') {
             const waitHours = errorData.num
-            logger.error(`图片/视频生成额度已用尽，需等待约 ${waitHours || '未知'} 小时`, 'CHAT')
+            logger.error(`图片/视频生成额度已用尽，需等待约 ${waitHours || '未知'} 小时`, 'CHAT', '', errorData)
             return {
-                error: `当前账号的该功能使用次数已达上限。${waitHours ? `请等待约 ${waitHours} 小时后再试。` : ''}`,
+                error: `当前账号的该功能使用次数已达上限，${waitHours ? `请等待约 ${waitHours} 小时后再试` : '请稍后再试'}`,
                 code: errorData.code,
                 wait_hours: waitHours
             }
         }
 
+        logger.error('请求上游服务时出现错误', 'CHAT', '', errorData)
         return {
             error: errorData.details || errorData.code || '服务错误，请稍后再试',
             code: errorData.code
@@ -49,6 +51,7 @@ const parseUpstreamImageErrorFromText = (text) => {
             return null
         }
 
+        // 图片接口在额度耗尽时可能返回普通 JSON 文本而不是 SSE，需要在流结束后补做一次识别
         return parseUpstreamImageError(JSON.parse(text))
     } catch (e) {
         return null
@@ -192,6 +195,7 @@ const handleImageVideoCompletion = async (req, res) => {
         }
 
         if (chat_type == 't2v') {
+            // 视频提交接口返回同步 JSON，这里保持非流式请求，后续再轮询任务状态
             reqBody.stream = false
         }
 
@@ -241,6 +245,7 @@ const handleImageVideoCompletion = async (req, res) => {
             let contentUrl = null
             if (newChatType == 't2i' || newChatType == 'image_edit') {
                 const decoder = new TextDecoder('utf-8')
+                // 使用 buffer 累积 SSE 分片，避免单个 data 事件被拆包时 JSON 解析失败
                 let buffer = ''
                 let rawText = ''
                 response_data.data.on('data', async (chunk) => {
@@ -266,13 +271,14 @@ const handleImageVideoCompletion = async (req, res) => {
                             if (jsonObj && jsonObj.choices && jsonObj.choices[0] && jsonObj.choices[0].delta && typeof jsonObj.choices[0].delta.content === 'string' && jsonObj.choices[0].delta.content.trim() != "" && contentUrl == null) {
                                 contentUrl = jsonObj.choices[0].delta.content
                             }
-                        } catch (e) {
-                            logger.error('图片SSE解析失败', 'CHAT', '', e)
+                        } catch (error) {
+                            logger.error('图片SSE解析失败', 'CHAT', '', error)
                         }
                     }
                 })
 
                 response_data.data.on('end', () => {
+                    // 某些失败场景会上游直接返回 JSON 文本，这里优先透传真实错误，再回退到图片链接响应
                     const upstreamError = parseUpstreamImageErrorFromText(rawText.trim())
                     if (upstreamError) {
                         return res.status(429).json(upstreamError)
@@ -284,7 +290,7 @@ const handleImageVideoCompletion = async (req, res) => {
             }
 
         } catch (error) {
-            logger.error('图片处理错误', 'CHAT', error)
+            logger.error('图片处理错误', 'CHAT', '', error)
             res.status(500).json({ error: "服务错误!!!" })
         }
 
@@ -335,6 +341,7 @@ const returnResponse = (res, model, contentUrl, stream) => {
 
 const handleVideoCompletion = async (req, res, response_data, token) => {
     try {
+        // 视频生成失败时与图片共用同一套上游错误模板解析
         const upstreamError = parseUpstreamImageError(response_data)
         if (upstreamError) {
             return res.status(429).json(upstreamError)
@@ -394,7 +401,7 @@ ${content}
                 }
                 return
             } else if (content == null && req.body.stream) {
-                // 发送空数据保活
+                // 视频生成耗时较长，流式模式下定期发送空 chunk 保活，避免下游连接超时
                 if (!headersInitialized && !res.headersSent) {
                     setResponseHeaders(res, req.body.stream)
                     headersInitialized = true
@@ -405,8 +412,8 @@ ${content}
             await sleep(delay)
         }
     } catch (error) {
-        logger.error('获取视频任务状态失败', 'CHAT', error)
-        res.status(500).json({ error: error.response_data?.data?.code || "可能该帐号今日生成次数已用完" })
+        logger.error('获取视频任务状态失败', 'CHAT', '', error)
+        res.status(500).json({ error: error.response?.data?.data?.code || "可能该帐号今日生成次数已用完" })
     }
 }
 
@@ -439,7 +446,7 @@ const getVideoTaskStatus = async (videoTaskID, token) => {
         logger.info(`获取视频任务 ${videoTaskID} 状态: ${response_data.data?.task_status}`, 'CHAT')
         return null
     } catch (error) {
-        console.log(error.response.data)
+        console.log(error.response?.data)
         return null
     }
 }
