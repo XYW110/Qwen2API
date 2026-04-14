@@ -2,7 +2,7 @@
 
 # 🚀 Qwen-Proxy
 
-[![Version](https://img.shields.io/badge/version-2026.04.06.12.30-blue.svg)](https://github.com/Rfym21/Qwen2API)
+[![Version](https://img.shields.io/badge/version-2026.04.14.09.30-blue.svg)](https://github.com/Rfym21/Qwen2API)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://hub.docker.com/r/rfym21/qwen2api)
 
@@ -20,7 +20,8 @@ Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换
 - 兼容 OpenAI API 格式，无缝对接各类客户端
 - 支持多账户轮询，提高可用性
 - 支持流式/非流式响应
-- 支持多模态（图片识别、图片生成）
+- 支持多模态（图片识别、视频理解、图片/视频生成）
+- 支持 OpenAI 风格资源端点：`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`
 - 支持智能搜索、深度思考等高级功能
 - 支持 CLI 端点，提供 256K 上下文和工具调用能力
 - 提供 Web 管理界面，方便配置和监控
@@ -376,13 +377,23 @@ Authorization: Bearer sk-your-api-key
 GET /models (免认证)
 ```
 
+**说明:**
+- `id`: 推荐直接作为请求里的 `model` 使用，优先展示更易读的模型名称
+- `name`: 上游原始模型 ID，便于与官方接口或日志对照
+- `upstream_id`: 不带能力后缀的上游模型 ID
+- `display_name`: 不带能力后缀的展示名
+- 当 `SIMPLE_MODEL_MAP=false` 时，会额外返回 `-thinking`、`-search`、`-image`、`-video`、`-image-edit` 等能力变体
+
 **响应示例:**
 ```json
 {
   "object": "list",
   "data": [
     {
-      "id": "qwen-max-latest",
+      "id": "Qwen3-Omni-Flash-image",
+      "name": "qwen3-omni-flash-2025-12-01-image",
+      "upstream_id": "qwen3-omni-flash-2025-12-01",
+      "display_name": "Qwen3-Omni-Flash",
       "object": "model",
       "created": 1677610602,
       "owned_by": "qwen"
@@ -404,7 +415,7 @@ Authorization: Bearer sk-your-api-key
 **请求体:**
 ```json
 {
-  "model": "qwen-max-latest",
+  "model": "Qwen3.6-Plus",
   "messages": [
     {
       "role": "system",
@@ -427,7 +438,7 @@ Authorization: Bearer sk-your-api-key
   "id": "chatcmpl-123",
   "object": "chat.completion",
   "created": 1677652288,
-  "model": "qwen-max-latest",
+  "model": "qwen3.6-plus",
   "choices": [
     {
       "index": 0,
@@ -446,22 +457,21 @@ Authorization: Bearer sk-your-api-key
 }
 ```
 
-### 🎨 图像生成/编辑
+### 🎨 图像与视频生成
 
-使用 `-image` 模型启用文本到图像生成功能。
-使用 `-image-edit` 模型启用图像修改功能。
-当使用 `-image` 模型时你可以通过在请求体中添加 `size` 参数或在消息内容中包含特定关键词 `1:1`, `4:3`, `3:4`, `16:9`, `9:16` 来控制图片尺寸。
+当前支持两种调用方式：
+- 使用 `/v1/chat/completions` + 模型后缀：`-image`、`-image-edit`、`-video`
+- 使用 OpenAI 风格资源端点：`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`
 
-```http
-POST /v1/chat/completions
-Content-Type: application/json
-Authorization: Bearer sk-your-api-key
-```
+以下示例中的模型名请以 `/v1/models` 返回的 `id` 字段为准。
 
-**请求体:**
+#### 方式一：通过 `/v1/chat/completions`
+
+文本生图：
+
 ```json
 {
-  "model": "qwen-max-latest-image",
+  "model": "Qwen3-Omni-Flash-image",
   "messages": [
     {
       "role": "user",
@@ -473,23 +483,127 @@ Authorization: Bearer sk-your-api-key
 }
 ```
 
-**支持的参数:**
-- `size`: 图片尺寸，支持 `"1:1"`、`"4:3"`、`"3:4"`、`"16:9"`、`"9:16"`
-- `stream`: 支持流式和非流式响应
+图片编辑：
 
-**响应示例:**
 ```json
 {
-  "created": 1677652288,
-  "model": "qwen-max-latest",
-  "choices": [
+  "model": "Qwen3-Omni-Flash-image-edit",
+  "messages": [
     {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "![image](https://example.com/generated-image.jpg)"
-      },
-      "finish_reason": "stop"
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "把这张图片改成浅蓝色科技风海报"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,..."
+          }
+        }
+      ]
+    }
+  ],
+  "stream": false
+}
+```
+
+视频生成：
+
+```json
+{
+  "model": "Qwen3-Omni-Flash-video",
+  "messages": [
+    {
+      "role": "user",
+      "content": "生成一个 3 秒夜景延时视频，城市街道霓虹灯闪烁"
+    }
+  ],
+  "size": "9:16",
+  "stream": false
+}
+```
+
+**支持的尺寸参数:**
+- `/v1/chat/completions` 下的图片/视频生成支持 `1:1`、`4:3`、`3:4`、`16:9`、`9:16`
+- `/v1/images/generations`、`/v1/images/edits`、`/v1/videos` 兼容 `1024x1024`、`1536x1024`、`1024x1536`、`1792x1024`、`1024x1792`
+
+#### 方式二：OpenAI 风格资源端点
+
+图像生成：
+
+```http
+POST /v1/images/generations
+Content-Type: application/json
+Authorization: Bearer sk-your-api-key
+```
+
+```json
+{
+  "model": "Qwen3-Omni-Flash",
+  "prompt": "一只橘猫坐在木桌上看向镜头，写实风格",
+  "size": "1024x1024",
+  "response_format": "url"
+}
+```
+
+图像编辑：
+
+```http
+POST /v1/images/edits
+Content-Type: multipart/form-data
+Authorization: Bearer sk-your-api-key
+```
+
+表单字段：
+- `model`: 可选，不传时自动选择支持图片编辑的默认模型
+- `prompt`: 可选，默认为 `请基于上传图片完成编辑`
+- `image`: 必填，支持 multipart 文件上传，也支持 JSON 字符串形式的图片 URL / data URI
+- `size`: 可选，支持 OpenAI 风格尺寸写法
+- `response_format`: 可选，支持 `url`、`b64_json`
+
+视频生成：
+
+```http
+POST /v1/videos
+Content-Type: application/json
+Authorization: Bearer sk-your-api-key
+```
+
+```json
+{
+  "model": "Qwen3-Omni-Flash",
+  "prompt": "一个简短的 3 秒夜景延时视频，城市街道霓虹灯闪烁",
+  "size": "1024x1792"
+}
+```
+
+图像生成响应示例：
+
+```json
+{
+  "created": 1776126402,
+  "data": [
+    {
+      "url": "https://cdn.qwenlm.ai/output/example/generated-image.png"
+    }
+  ]
+}
+```
+
+视频生成响应示例：
+
+```json
+{
+  "id": "video_1776126509490",
+  "object": "video",
+  "created": 1776126509,
+  "model": "qwen3-omni-flash-2025-12-01",
+  "status": "completed",
+  "data": [
+    {
+      "url": "https://cdn.qwenlm.ai/output/example/generated-video.mp4"
     }
   ]
 }
@@ -503,7 +617,7 @@ Authorization: Bearer sk-your-api-key
 
 ```json
 {
-  "model": "qwen-max-latest-search",
+  "model": "Qwen3.6-Plus-search",
   "messages": [...]
 }
 ```
@@ -514,7 +628,7 @@ Authorization: Bearer sk-your-api-key
 
 ```json
 {
-  "model": "qwen-max-latest-thinking",
+  "model": "Qwen3.6-Plus-thinking",
   "messages": [...]
 }
 ```
@@ -525,40 +639,20 @@ Authorization: Bearer sk-your-api-key
 
 ```json
 {
-  "model": "qwen-max-latest-thinking-search",
+  "model": "Qwen3.6-Plus-thinking-search",
   "messages": [...]
 }
 ```
 
-#### 🎨 T2I 生图模式
-
-通过设置 `chat_type` 参数为 `t2i` 启用文本到图像生成功能：
-
-```json
-{
-  "model": "qwen-max-latest",
-  "chat_type": "t2i",
-  "messages": [
-    {
-      "role": "user",
-      "content": "画一只可爱的小猫咪"
-    }
-  ],
-  "size": "1:1"
-}
-```
-
-**支持的图片尺寸:** `1:1`、`4:3`、`3:4`、`16:9`、`9:16`
-
-**智能尺寸识别:** 系统会自动从提示词中识别尺寸关键词并设置对应尺寸
-
 #### 🖼️ 多模态支持
 
-API 自动处理图像上传，支持在对话中发送图片：
+API 自动处理图片和视频上传，支持在对话中发送图片、视频 URL 或 Base64 data URI。
+
+图片理解示例：
 
 ```json
 {
-  "model": "qwen-max-latest",
+  "model": "Qwen3.5-Omni-Plus",
   "messages": [
     {
       "role": "user",
@@ -578,6 +672,36 @@ API 自动处理图像上传，支持在对话中发送图片：
   ]
 }
 ```
+
+视频理解示例：
+
+```json
+{
+  "model": "Qwen3.5-Omni-Plus",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "请用一句话描述这个视频"
+        },
+        {
+          "type": "input_video",
+          "input_video": {
+            "url": "data:video/mp4;base64,..."
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+支持的视频字段：
+- `input_video`
+- `video_url`
+- `video`
 
 ### 🖥️ CLI 端点
 

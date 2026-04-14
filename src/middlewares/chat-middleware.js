@@ -44,7 +44,7 @@ const processRequestBody = async (req, res, next) => {
     req.enable_web_search = body.chat_type === 'search' ? true : false
     
     // 处理 model 参数 : 模型
-    body.model = parserModel(model)
+    body.model = await parserModel(model)
     
     // 处理 messages 参数 : 消息历史
     body.messages = await parserMessages(messages, isThinkingEnabled(model, enable_thinking, thinking_budget), body.chat_type)

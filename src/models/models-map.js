@@ -49,4 +49,19 @@ const getLatestModels = async (force = false) => {
     return fetchPromise
 }
 
-module.exports = { getLatestModels }
+/**
+ * 根据聊天类型获取默认模型
+ * @param {string} chatType - 聊天类型
+ * @returns {Promise<string|null>} 默认模型 ID
+ */
+const getDefaultModelByChatType = async (chatType) => {
+    const models = await getLatestModels()
+
+    const matchedModel = models.find(model => model?.info?.meta?.chat_type?.includes(chatType))
+    return matchedModel?.id || null
+}
+
+module.exports = {
+    getLatestModels,
+    getDefaultModelByChatType
+}

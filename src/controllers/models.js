@@ -1,14 +1,32 @@
 const { getLatestModels } = require('../models/models-map.js')
 const config = require('../config/index.js')
 
+/**
+ * 构造对外暴露的模型信息
+ * @param {object} model - 原始模型信息
+ * @param {string} suffix - 变体后缀
+ * @returns {object} 对外模型信息
+ */
+const buildPublicModelData = (model, suffix = '') => {
+    const modelData = JSON.parse(JSON.stringify(model))
+    const upstreamModelID = String(model?.id || '')
+    const displayModelID = String(model?.name || model?.id || '')
+
+    modelData.id = `${displayModelID}${suffix}`
+    modelData.name = `${upstreamModelID}${suffix}`
+    modelData.upstream_id = upstreamModelID
+    modelData.display_name = displayModelID
+
+    return modelData
+}
+
 const handleGetModels = async (req, res) => {
     const models = []
 
     const ModelsMap = await getLatestModels()
 
     for (const model of ModelsMap) {
-        delete model.name
-        models.push(model)
+        models.push(buildPublicModelData(model))
 
         if (config.simpleModelMap) {
             continue
@@ -22,46 +40,31 @@ const handleGetModels = async (req, res) => {
         const isDeepResearch = model?.info?.meta?.chat_type?.includes('deep_research')
 
         if (isThinking) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-thinking`
-
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-thinking'))
         }
 
         if (isSearch) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-search`
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-search'))
         }
 
         if (isThinking && isSearch) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-thinking-search`
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-thinking-search'))
         }
 
         if (isImage) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-image`
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-image'))
         }
 
         if (isVideo) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-video`
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-video'))
         }
 
         if (isImageEdit) {
-            const newModelData = JSON.parse(JSON.stringify(model))
-            newModelData.id = `${model.id}-image-edit`
-            models.push(newModelData)
+            models.push(buildPublicModelData(model, '-image-edit'))
         }
 
         // if (isDeepResearch) {
-        //     const newModelData = JSON.parse(JSON.stringify(model))
-        //     newModelData.id = `${model.id}-deep-research`
-        //     models.push(newModelData)
+        //     models.push(buildPublicModelData(model, '-deep-research'))
         // }
     }
     res.json({

@@ -4,8 +4,14 @@ const { setResponseHeaders } = require('./chat.js')
 const accountManager = require('../utils/account.js')
 const { sleep } = require('../utils/tools.js')
 const { generateChatID } = require('../utils/request.js')
+const { uploadFileToQwenOss } = require('../utils/upload.js')
+const { parserModel } = require('../utils/chat-helpers.js')
+const { getDefaultModelByChatType } = require('../models/models-map.js')
 const { getSsxmodItna, getSsxmodItna2 } = require('../utils/ssxmod-manager')
 const { getProxyAgent, getChatBaseUrl, applyProxyToAxiosConfig } = require('../utils/proxy-helper')
+
+const DATA_URI_REGEX = /^data:(.+);base64,(.*)$/i
+const HTTP_URL_REGEX = /^https?:\/\//i
 
 /**
  * 构造与当前账号一致的上游 Cookie 头
@@ -577,6 +583,260 @@ const buildImageContent = (contentUrl) => `![image](${contentUrl})`
 const buildVideoContent = (contentUrl) => `\n<video controls="controls">\n${contentUrl}\n</video>\n\n[Download Video](${contentUrl})\n`
 
 /**
+ * 解析可能为 JSON 字符串的请求字段
+ * @param {*} value - 原始值
+ * @returns {*} 解析后的值
+ */
+const parseMaybeJSON = (value) => {
+    if (typeof value !== 'string') {
+        return value
+    }
+
+    const trimmedValue = value.trim()
+    if (!trimmedValue) {
+        return value
+    }
+
+    try {
+        return JSON.parse(trimmedValue)
+    } catch (e) {
+        return value
+    }
+}
+
+/**
+ * 统一转为数组
+ * @param {*} value - 原始值
+ * @returns {Array<*>} 数组结果
+ */
+const ensureArray = (value) => {
+    const parsedValue = parseMaybeJSON(value)
+
+    if (parsedValue === undefined || parsedValue === null || parsedValue === '') {
+        return []
+    }
+
+    return Array.isArray(parsedValue) ? parsedValue : [parsedValue]
+}
+
+/**
+ * 规范化 OpenAI 风格尺寸参数
+ * @param {string} size - 原始尺寸
+ * @returns {string|undefined} 规范化后的尺寸
+ */
+const normalizeOpenAIImageVideoSize = (size) => {
+    if (!size) {
+        return undefined
+    }
+
+    const normalizedSizeMap = {
+        '1024x1024': '1:1',
+        '1536x1024': '4:3',
+        '1024x1536': '3:4',
+        '1792x1024': '16:9',
+        '1024x1792': '9:16'
+    }
+
+    return normalizedSizeMap[size] || size
+}
+
+/**
+ * 统一构造 OpenAI 风格错误响应
+ * @param {object} res - Express 响应对象
+ * @param {*} error - 错误对象
+ * @returns {*} 响应结果
+ */
+const sendOpenAIErrorResponse = (res, error) => {
+    const status = error?.status || 500
+    const message = error?.error || error?.message || '服务错误，请稍后再试'
+
+    return res.status(status).json({
+        error: {
+            message,
+            type: status >= 500 ? 'server_error' : 'invalid_request_error'
+        }
+    })
+}
+
+/**
+ * 下载资源并转换为 Base64
+ * @param {string} contentUrl - 资源链接
+ * @returns {Promise<string>} Base64 内容
+ */
+const downloadAssetAsBase64 = async (contentUrl) => {
+    const proxyAgent = getProxyAgent()
+    const requestConfig = {
+        responseType: 'arraybuffer',
+        timeout: 1000 * 60 * 2
+    }
+
+    if (proxyAgent) {
+        requestConfig.httpsAgent = proxyAgent
+        requestConfig.proxy = false
+    }
+
+    const responseData = await axios.get(contentUrl, requestConfig)
+    return Buffer.from(responseData.data).toString('base64')
+}
+
+/**
+ * 构造 OpenAI 图像响应项
+ * @param {string} contentUrl - 图片链接
+ * @param {string} responseFormat - 输出格式
+ * @returns {Promise<object>} 图像响应项
+ */
+const buildOpenAIImageResultItem = async (contentUrl, responseFormat) => {
+    if (responseFormat === 'b64_json') {
+        return {
+            b64_json: await downloadAssetAsBase64(contentUrl)
+        }
+    }
+
+    return {
+        url: contentUrl
+    }
+}
+
+/**
+ * 从请求对象中提取内联媒体链接
+ * @param {*} value - 原始媒体值
+ * @param {string} mediaType - 媒体类型
+ * @returns {string|null} 媒体链接
+ */
+const extractInlineMediaURL = (value, mediaType) => {
+    const parsedValue = parseMaybeJSON(value)
+
+    if (typeof parsedValue === 'string') {
+        return parsedValue
+    }
+
+    if (!parsedValue || typeof parsedValue !== 'object') {
+        return null
+    }
+
+    if (mediaType === 'video') {
+        return parsedValue.url || parsedValue.video || parsedValue.video_url?.url || parsedValue.input_video?.url || parsedValue.input_video?.video_url || null
+    }
+
+    return parsedValue.url || parsedValue.image || parsedValue.image_url?.url || null
+}
+
+/**
+ * 构造内部媒体内容项
+ * @param {string} mediaType - 媒体类型
+ * @param {string} mediaURL - 媒体链接
+ * @returns {object} 内部媒体内容项
+ */
+const buildInternalMediaItem = (mediaType, mediaURL) => {
+    if (mediaType === 'video') {
+        return {
+            type: 'video',
+            video: mediaURL
+        }
+    }
+
+    return {
+        type: 'image',
+        image: mediaURL
+    }
+}
+
+/**
+ * 上传 multipart 文件并构造内部媒体内容项
+ * @param {object} file - multer 文件对象
+ * @param {string} mediaType - 媒体类型
+ * @returns {Promise<object>} 内部媒体内容项
+ */
+const uploadMultipartMediaFile = async (file, mediaType) => {
+    if (!file?.buffer) {
+        throw new Error('上传文件内容为空')
+    }
+
+    const fallbackExtension = mediaType === 'video' ? 'mp4' : 'png'
+    const originalFilename = file.originalname || `upload.${fallbackExtension}`
+    const uploadResult = await uploadFileToQwenOss(file.buffer, originalFilename, accountManager.getAccountToken())
+
+    if (!uploadResult || uploadResult.status !== 200) {
+        throw new Error('文件上传失败')
+    }
+
+    return buildInternalMediaItem(mediaType, uploadResult.file_url)
+}
+
+/**
+ * 将内联媒体参数转换为内部媒体内容项
+ * @param {*} value - 原始媒体值
+ * @param {string} mediaType - 媒体类型
+ * @returns {Promise<object|null>} 内部媒体内容项
+ */
+const normalizeInlineMediaItem = async (value, mediaType) => {
+    const mediaURL = extractInlineMediaURL(value, mediaType)
+    if (!mediaURL) {
+        return null
+    }
+
+    if (HTTP_URL_REGEX.test(mediaURL)) {
+        return buildInternalMediaItem(mediaType, mediaURL)
+    }
+
+    const matchedDataURI = mediaURL.match(DATA_URI_REGEX)
+    if (!matchedDataURI) {
+        return buildInternalMediaItem(mediaType, mediaURL)
+    }
+
+    const mimeType = matchedDataURI[1]
+    const base64Content = matchedDataURI[2]
+    const fileExtension = mimeType?.split('/')[1] || (mediaType === 'video' ? 'mp4' : 'png')
+    const uploadResult = await uploadFileToQwenOss(Buffer.from(base64Content, 'base64'), `upload.${fileExtension}`, accountManager.getAccountToken())
+
+    if (!uploadResult || uploadResult.status !== 200) {
+        throw new Error('文件上传失败')
+    }
+
+    return buildInternalMediaItem(mediaType, uploadResult.file_url)
+}
+
+/**
+ * 收集请求中的媒体内容项
+ * @param {object} req - Express 请求对象
+ * @param {string} fieldName - 字段名
+ * @param {string} mediaType - 媒体类型
+ * @returns {Promise<Array<object>>} 媒体内容项列表
+ */
+const collectRequestMediaItems = async (req, fieldName, mediaType) => {
+    const mediaItems = []
+    const matchedFiles = (req.files || []).filter(file => file.fieldname === fieldName)
+
+    for (const file of matchedFiles) {
+        mediaItems.push(await uploadMultipartMediaFile(file, mediaType))
+    }
+
+    for (const value of ensureArray(req.body?.[fieldName])) {
+        const normalizedMediaItem = await normalizeInlineMediaItem(value, mediaType)
+        if (normalizedMediaItem) {
+            mediaItems.push(normalizedMediaItem)
+        }
+    }
+
+    return mediaItems
+}
+
+/**
+ * 解析请求模型，未显式传入时按能力选择默认模型
+ * @param {string} model - 请求模型
+ * @param {string} chatType - 聊天类型
+ * @returns {Promise<string>} 可直接发送到上游的模型 ID
+ */
+const resolveRequestedModel = async (model, chatType) => {
+    if (model) {
+        return parserModel(model)
+    }
+
+    const defaultModel = await getDefaultModelByChatType(chatType)
+    return defaultModel || parserModel(model)
+}
+
+/**
  * 读取视频上游流并提取任务信息
  * @param {*} responseStream - 上游响应流
  * @returns {Promise<{ upstreamError: object|null, contentUrl: string|null, videoTaskID: string|null, videoTaskCandidates: string[], responseIDs: string[], rawPreview: string }>} 解析结果
@@ -855,19 +1115,132 @@ const extractVideoInfoFromChatDetail = (chatDetail, responseIDs = []) => {
 }
 
 /**
- * 主要的聊天完成处理函数
- * @param {object} req - Express 请求对象
- * @param {object} res - Express 响应对象
+ * 解析图片生成结果链接
+ * @param {*} responseData - 上游响应
+ * @param {string} chatID - 会话 ID
+ * @param {string} token - 当前账号令牌
+ * @returns {Promise<string>} 图片链接
  */
-const handleImageVideoCompletion = async (req, res) => {
-    const { model, messages, size, chat_type } = req.body
-    const downstreamStream = req.body.stream === true
+const resolveImageResultContentUrl = async (responseData, chatID, token) => {
+    const { upstreamError, contentUrl: upstreamContentUrl, responseIDs, rawPreview } = await readImageUpstreamResult(responseData)
+    if (upstreamError) {
+        throw upstreamError
+    }
 
+    let contentUrl = upstreamContentUrl
+
+    if (!contentUrl && chatID) {
+        logger.info(`图片上游未直接返回链接，尝试从聊天详情补取，chat_id=${chatID} responseIDs=${JSON.stringify(responseIDs)}`, 'CHAT')
+
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            const chatDetail = await getChatDetail(chatID, token)
+            const extractedInfo = extractVideoInfoFromChatDetail(chatDetail, responseIDs)
+            if (extractedInfo.contentUrl) {
+                contentUrl = extractedInfo.contentUrl
+                break
+            }
+
+            await sleep(800)
+        }
+    }
+
+    if (!contentUrl) {
+        logger.warn(`图片上游响应未解析出图片链接，responseIDs=${JSON.stringify(responseIDs)} preview=${rawPreview}`, 'CHAT')
+        throw new Error('上游未返回图片链接')
+    }
+
+    return contentUrl
+}
+
+/**
+ * 解析视频生成结果链接
+ * @param {*} responseStream - 上游响应流
+ * @param {string} token - 当前账号令牌
+ * @param {string} chatID - 会话 ID
+ * @returns {Promise<string>} 视频链接
+ */
+const resolveVideoResultContentUrl = async (responseStream, token, chatID) => {
+    const { upstreamError, contentUrl: upstreamContentUrl, videoTaskCandidates, responseIDs, rawPreview } = await readVideoUpstreamResult(responseStream)
+    if (upstreamError) {
+        throw upstreamError
+    }
+
+    if (upstreamContentUrl) {
+        return upstreamContentUrl
+    }
+
+    let resolvedContentUrl = upstreamContentUrl
+    let resolvedTaskCandidates = [...videoTaskCandidates]
+
+    if (!resolvedContentUrl && resolvedTaskCandidates.length === 0 && chatID) {
+        logger.info(`视频上游未直接返回任务信息，尝试从聊天详情补取，chat_id=${chatID} responseIDs=${JSON.stringify(responseIDs)}`, 'CHAT')
+
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            const chatDetail = await getChatDetail(chatID, token)
+            const extractedInfo = extractVideoInfoFromChatDetail(chatDetail, responseIDs)
+
+            if (!resolvedContentUrl && extractedInfo.contentUrl) {
+                resolvedContentUrl = extractedInfo.contentUrl
+            }
+
+            for (const taskID of extractedInfo.videoTaskCandidates) {
+                if (!resolvedTaskCandidates.includes(taskID)) {
+                    resolvedTaskCandidates.push(taskID)
+                }
+            }
+
+            if (resolvedContentUrl || resolvedTaskCandidates.length > 0) {
+                break
+            }
+
+            await sleep(1200)
+        }
+    }
+
+    if (resolvedContentUrl) {
+        return resolvedContentUrl
+    }
+
+    if (resolvedTaskCandidates.length === 0) {
+        logger.warn(`视频上游响应未解析出任务信息，contentUrl=${resolvedContentUrl || '空'} candidates=${JSON.stringify(resolvedTaskCandidates)} responseIDs=${JSON.stringify(responseIDs)} preview=${rawPreview}`, 'CHAT')
+        throw new Error('上游未返回视频任务 ID 或视频链接')
+    }
+
+    logger.info(`视频任务候选ID: ${JSON.stringify(resolvedTaskCandidates)}`, 'CHAT')
+
+    const maxAttempts = 60
+    const delay = 20 * 1000
+
+    for (const taskCandidate of resolvedTaskCandidates) {
+        logger.info(`开始轮询视频任务ID: ${taskCandidate}`, 'CHAT')
+
+        for (let i = 0; i < maxAttempts; i++) {
+            const content = await getVideoTaskStatus(taskCandidate, token)
+            if (content) {
+                return content
+            }
+
+            await sleep(delay)
+        }
+    }
+
+    logger.error(`视频任务 ${JSON.stringify(resolvedTaskCandidates)} 轮询超时`, 'CHAT')
+    throw {
+        status: 504,
+        error: '视频生成超时，请稍后再试'
+    }
+}
+
+/**
+ * 统一执行图片/视频请求
+ * @param {object} payload - 内部请求体
+ * @returns {Promise<{ model: string, chatType: string, contentUrl: string, content: string }>} 执行结果
+ */
+const generateImageVideoResult = async (payload) => {
+    const { model, messages, size, chat_type } = payload
     const token = accountManager.getAccountToken()
 
     try {
-
-        // 请求体模板
         const reqBody = {
             "stream": false,
             "version": "2.1",
@@ -887,107 +1260,97 @@ const handleImageVideoCompletion = async (req, res) => {
             ]
         }
 
-        const chat_id = await generateChatID(token, model)
+        const chatID = await generateChatID(token, model)
 
-        if (!chat_id) {
-            // 如果生成chat_id失败，则返回错误
-            throw new Error()
-        } else {
-            reqBody.chat_id = chat_id
+        if (!chatID) {
+            throw new Error('生成 chat_id 失败')
         }
 
-        // 拿到用户最后一句消息
-        const _userPrompt = messages[messages.length - 1].content
-        if (!_userPrompt) {
-            throw new Error()
+        reqBody.chat_id = chatID
+
+        const userPrompt = messages?.[messages.length - 1]?.content
+        if (!userPrompt) {
+            throw {
+                status: 400,
+                error: '缺少有效的提示词'
+            }
         }
 
-        // 提取历史消息
-        const messagesHistory = messages.filter(item => item.role == "user" || item.role == "assistant")
-        // 聊天消息中所有图片url
-        const select_image_list = []
+        const messagesHistory = messages.filter(item => item.role === 'user' || item.role === 'assistant')
+        const selectedImageList = []
 
-        // 遍历模型回复消息，拿到所有图片
-        if (chat_type == "image_edit") {
+        if (chat_type === 'image_edit') {
             for (const item of messagesHistory) {
-                if (item.role == "assistant") {
-                    // 使用matchAll提取所有图片链接
-                    const matches = [...item.content.matchAll(/!\[image\]\((.*?)\)/g)]
-                    // 将所有匹配到的图片url添加到图片列表
+                if (item.role === 'assistant') {
+                    const matches = [...String(item.content || '').matchAll(/!\[image\]\((.*?)\)/g)]
                     for (const match of matches) {
-                        select_image_list.push(match[1])
+                        selectedImageList.push(match[1])
                     }
-                } else {
-                    if (Array.isArray(item.content) && item.content.length > 0) {
-                        for (const content of item.content) {
-                            if (content.type == "image") {
-                                select_image_list.push(content.image)
-                            }
+                } else if (Array.isArray(item.content) && item.content.length > 0) {
+                    for (const content of item.content) {
+                        if (content.type === 'image') {
+                            selectedImageList.push(content.image)
                         }
                     }
                 }
             }
         }
 
-        //分情况处理
-        if (chat_type == 't2i' || chat_type == 't2v') {
-            if (Array.isArray(_userPrompt)) {
-                reqBody.messages[0].content = _userPrompt.map(item => item.type == "text" ? item.text : "").join("\n\n")
+        if (chat_type === 't2i' || chat_type === 't2v') {
+            if (Array.isArray(userPrompt)) {
+                reqBody.messages[0].content = userPrompt.map(item => item.type === 'text' ? item.text : '').join('\n\n')
             } else {
-                reqBody.messages[0].content = _userPrompt
+                reqBody.messages[0].content = userPrompt
             }
-        } else if (chat_type == 'image_edit') {
-            if (!Array.isArray(_userPrompt)) {
-
+        } else if (chat_type === 'image_edit') {
+            if (!Array.isArray(userPrompt)) {
                 if (messagesHistory.length === 1) {
-                    reqBody.messages[0].chat_type = "t2i"
-                } else if (select_image_list.length >= 1) {
+                    reqBody.messages[0].chat_type = 't2i'
+                } else if (selectedImageList.length >= 1) {
                     reqBody.messages[0].files.push({
                         "type": "image",
-                        "url": select_image_list[select_image_list.length - 1]
+                        "url": selectedImageList[selectedImageList.length - 1]
                     })
                 }
-                reqBody.messages[0].content += _userPrompt
+                reqBody.messages[0].content += userPrompt
             } else {
-                const texts = _userPrompt.filter(item => item.type == "text")
+                const texts = userPrompt.filter(item => item.type === 'text')
                 if (texts.length === 0) {
-                    throw new Error()
+                    throw {
+                        status: 400,
+                        error: '图片编辑请求缺少文本提示词'
+                    }
                 }
-                // 拼接提示词
+
                 for (const item of texts) {
                     reqBody.messages[0].content += item.text
                 }
 
-                const files = _userPrompt.filter(item => item.type == "image")
-                // 如果图片为空，则设置为t2i
+                const files = userPrompt.filter(item => item.type === 'image')
                 if (files.length === 0) {
-                    reqBody.messages[0].chat_type = "t2i"
+                    reqBody.messages[0].chat_type = 't2i'
                 }
-                // 遍历图片
+
                 for (const item of files) {
                     reqBody.messages[0].files.push({
                         "type": "image",
                         "url": item.image
                     })
                 }
-
             }
         }
 
-
-        // 处理图片视频尺寸
-        if (chat_type == 't2i' || chat_type == 't2v') {
-            // 获取图片尺寸，优先级 参数 > 提示词 > 默认
-            if (size != undefined && size != null) {
+        if (chat_type === 't2i' || chat_type === 't2v') {
+            if (size !== undefined && size !== null) {
                 reqBody.size = size
-            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@4:3") != -1) {
-                reqBody.size = "4:3"//"1024*768"
-            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@3:4") != -1) {
-                reqBody.size = "3:4"//"768*1024"
-            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@16:9") != -1) {
-                reqBody.size = "16:9"//"1280*720"
-            } else if (typeof _userPrompt === 'string' && _userPrompt.indexOf("@9:16") != -1) {
-                reqBody.size = "9:16"//"720*1280"
+            } else if (typeof userPrompt === 'string' && userPrompt.indexOf('@4:3') !== -1) {
+                reqBody.size = '4:3'
+            } else if (typeof userPrompt === 'string' && userPrompt.indexOf('@3:4') !== -1) {
+                reqBody.size = '3:4'
+            } else if (typeof userPrompt === 'string' && userPrompt.indexOf('@16:9') !== -1) {
+                reqBody.size = '16:9'
+            } else if (typeof userPrompt === 'string' && userPrompt.indexOf('@9:16') !== -1) {
+                reqBody.size = '9:16'
             }
         }
 
@@ -996,12 +1359,14 @@ const handleImageVideoCompletion = async (req, res) => {
         const cookieHeader = buildUpstreamCookieHeader(token)
 
         logger.info('发送图片视频请求', 'CHAT')
-        logger.info(`选择图片: ${select_image_list[select_image_list.length - 1] || "未选择图片，切换生成图/视频模式"}`, 'CHAT')
+        logger.info(`选择图片: ${selectedImageList[selectedImageList.length - 1] || '未选择图片，切换生成图/视频模式'}`, 'CHAT')
         logger.info(`使用提示: ${reqBody.messages[0].content}`, 'CHAT')
+
         const newChatType = reqBody.messages[0].chat_type
-        const upstreamStream = newChatType == 't2i' || newChatType == 'image_edit'
+        const upstreamStream = newChatType === 't2i' || newChatType === 'image_edit'
         reqBody.stream = upstreamStream
-        logger.info(`图片视频流策略: upstream=${upstreamStream} downstream=${downstreamStream}`, 'CHAT')
+
+        logger.info(`图片视频流策略: upstream=${upstreamStream} downstream=${payload.stream === true}`, 'CHAT')
 
         const requestConfig = {
             headers: {
@@ -1024,24 +1389,23 @@ const handleImageVideoCompletion = async (req, res) => {
                 "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
                 ...(cookieHeader && { "Cookie": cookieHeader }),
             },
-            responseType: newChatType == 't2v' ? 'json' : (upstreamStream ? 'stream' : 'text'),
+            responseType: newChatType === 't2v' ? 'json' : (upstreamStream ? 'stream' : 'text'),
             timeout: 1000 * 60 * 5
         }
 
-        // 添加代理配置
         if (proxyAgent) {
             requestConfig.httpsAgent = proxyAgent
             requestConfig.proxy = false
         }
 
-        let response_data = null
+        let responseData = null
         const maxUpstreamAttempts = 2
 
         for (let attempt = 1; attempt <= maxUpstreamAttempts; attempt++) {
             try {
-                response_data = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chat_id}`, reqBody, requestConfig)
+                responseData = await axios.post(`${chatBaseUrl}/api/v2/chat/completions?chat_id=${chatID}`, reqBody, requestConfig)
 
-                const inlineUpstreamError = parseUpstreamImageError(response_data.data)
+                const inlineUpstreamError = parseUpstreamImageError(responseData.data)
                 if (attempt < maxUpstreamAttempts && isRetryableUpstreamError(inlineUpstreamError)) {
                     logger.warn(`图片/视频请求上游返回业务错误包，准备第 ${attempt + 1} 次重试，请求ID: ${inlineUpstreamError.request_id || '未知'}`, 'CHAT')
                     await sleep(800)
@@ -1062,54 +1426,86 @@ const handleImageVideoCompletion = async (req, res) => {
             }
         }
 
-        try {
-            if (newChatType == 't2i' || newChatType == 'image_edit') {
-                const { upstreamError, contentUrl: upstreamContentUrl, responseIDs, rawPreview } = await readImageUpstreamResult(response_data.data)
-                if (upstreamError) {
-                    return sendUpstreamError(res, upstreamError)
-                }
-
-                let contentUrl = upstreamContentUrl
-
-                if (!contentUrl && chat_id) {
-                    logger.info(`图片上游未直接返回链接，尝试从聊天详情补取，chat_id=${chat_id} responseIDs=${JSON.stringify(responseIDs)}`, 'CHAT')
-
-                    for (let attempt = 1; attempt <= 5; attempt++) {
-                        const chatDetail = await getChatDetail(chat_id, token)
-                        const extractedInfo = extractVideoInfoFromChatDetail(chatDetail, responseIDs)
-                        if (extractedInfo.contentUrl) {
-                            contentUrl = extractedInfo.contentUrl
-                            break
-                        }
-
-                        await sleep(800)
-                    }
-                }
-
-                if (!contentUrl) {
-                    logger.warn(`图片上游响应未解析出图片链接，responseIDs=${JSON.stringify(responseIDs)} preview=${rawPreview}`, 'CHAT')
-                    throw new Error('上游未返回图片链接')
-                }
-
-                return returnResponse(res, model, buildImageContent(contentUrl), downstreamStream)
-            } else if (newChatType == 't2v') {
-                return handleVideoCompletion(res, response_data.data, token, model, downstreamStream, chat_id)
+        if (newChatType === 't2i' || newChatType === 'image_edit') {
+            const contentUrl = await resolveImageResultContentUrl(responseData.data, chatID, token)
+            return {
+                model,
+                chatType: newChatType,
+                contentUrl,
+                content: buildImageContent(contentUrl)
             }
-
-        } catch (error) {
-            logger.error('图片视频资源处理错误', 'CHAT', '', error)
-            res.status(500).json({ error: "服务错误!!!" })
         }
 
+        if (newChatType === 't2v') {
+            const contentUrl = await resolveVideoResultContentUrl(responseData.data, token, chatID)
+            return {
+                model,
+                chatType: newChatType,
+                contentUrl,
+                content: buildVideoContent(contentUrl)
+            }
+        }
+
+        throw new Error('不支持的图片/视频类型')
     } catch (error) {
         logger.error('图片/视频主流程异常', 'CHAT', '', buildAxiosErrorLog(error))
-        const upstreamError = parseUpstreamImageError(error.response?.data)
-        if (upstreamError) {
-            return sendUpstreamError(res, upstreamError)
+
+        if (error?.error) {
+            throw error
         }
 
-        res.status(500).json({
-            error: "服务错误，请稍后再试"
+        const upstreamError = parseUpstreamImageError(error.response?.data)
+        if (upstreamError) {
+            throw upstreamError
+        }
+
+        throw {
+            status: 500,
+            error: error?.message || '服务错误，请稍后再试'
+        }
+    }
+}
+
+/**
+ * 主要的聊天完成处理函数
+ * @param {object} req - Express 请求对象
+ * @param {object} res - Express 响应对象
+ */
+const handleImageVideoCompletion = async (req, res) => {
+    const downstreamStream = req.body.stream === true
+    let keepAliveTimer = null
+
+    try {
+        if (downstreamStream && req.body.chat_type === 't2v') {
+            setResponseHeaders(res, true)
+            keepAliveTimer = setInterval(() => {
+                if (!res.writableEnded) {
+                    res.write(`: keep-alive\n\n`)
+                }
+            }, 15000)
+        }
+
+        const result = await generateImageVideoResult(req.body)
+
+        if (keepAliveTimer) {
+            clearInterval(keepAliveTimer)
+        }
+
+        return returnResponse(res, result.model, result.content, downstreamStream)
+    } catch (error) {
+        if (keepAliveTimer) {
+            clearInterval(keepAliveTimer)
+        }
+
+        logger.error('图片视频资源处理错误', 'CHAT', '', error)
+
+        if (downstreamStream) {
+            return returnResponse(res, req.body.model, error?.error || error?.message || '服务错误，请稍后再试', true)
+        }
+
+        return sendUpstreamError(res, error?.error ? error : {
+            status: 500,
+            error: error?.message || '服务错误，请稍后再试'
         })
     }
 }
@@ -1182,6 +1578,143 @@ const returnResponse = (res, model, content, stream) => {
                 }
             ]
         })
+    }
+}
+
+/**
+ * 处理 OpenAI 风格的图片生成端点
+ * @param {object} req - Express 请求对象
+ * @param {object} res - Express 响应对象
+ * @returns {Promise<void>}
+ */
+const handleOpenAIImagesGeneration = async (req, res) => {
+    try {
+        if (!req.body?.prompt) {
+            return sendOpenAIErrorResponse(res, {
+                status: 400,
+                error: 'prompt 是必填参数'
+            })
+        }
+
+        const model = await resolveRequestedModel(req.body.model, 't2i')
+        const result = await generateImageVideoResult({
+            model,
+            messages: [
+                {
+                    role: 'user',
+                    content: req.body.prompt
+                }
+            ],
+            size: normalizeOpenAIImageVideoSize(req.body.size),
+            chat_type: 't2i',
+            stream: false
+        })
+
+        const imageData = await buildOpenAIImageResultItem(result.contentUrl, req.body.response_format)
+
+        res.json({
+            created: Math.floor(Date.now() / 1000),
+            data: [imageData]
+        })
+    } catch (error) {
+        logger.error('OpenAI 图片生成端点处理失败', 'CHAT', '', error)
+        return sendOpenAIErrorResponse(res, error)
+    }
+}
+
+/**
+ * 处理 OpenAI 风格的图片编辑端点
+ * @param {object} req - Express 请求对象
+ * @param {object} res - Express 响应对象
+ * @returns {Promise<void>}
+ */
+const handleOpenAIImagesEdit = async (req, res) => {
+    try {
+        const imageItems = await collectRequestMediaItems(req, 'image', 'image')
+        if (imageItems.length === 0) {
+            return sendOpenAIErrorResponse(res, {
+                status: 400,
+                error: 'image 是必填参数'
+            })
+        }
+
+        const model = await resolveRequestedModel(req.body.model, 'image_edit')
+        const prompt = req.body.prompt || '请基于上传图片完成编辑'
+        const result = await generateImageVideoResult({
+            model,
+            messages: [
+                {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: prompt
+                        },
+                        ...imageItems
+                    ]
+                }
+            ],
+            size: normalizeOpenAIImageVideoSize(req.body.size),
+            chat_type: 'image_edit',
+            stream: false
+        })
+
+        const imageData = await buildOpenAIImageResultItem(result.contentUrl, req.body.response_format)
+
+        res.json({
+            created: Math.floor(Date.now() / 1000),
+            data: [imageData]
+        })
+    } catch (error) {
+        logger.error('OpenAI 图片编辑端点处理失败', 'CHAT', '', error)
+        return sendOpenAIErrorResponse(res, error)
+    }
+}
+
+/**
+ * 处理 OpenAI 风格的视频生成端点
+ * @param {object} req - Express 请求对象
+ * @param {object} res - Express 响应对象
+ * @returns {Promise<void>}
+ */
+const handleOpenAIVideoGeneration = async (req, res) => {
+    try {
+        if (!req.body?.prompt) {
+            return sendOpenAIErrorResponse(res, {
+                status: 400,
+                error: 'prompt 是必填参数'
+            })
+        }
+
+        const model = await resolveRequestedModel(req.body.model, 't2v')
+        const result = await generateImageVideoResult({
+            model,
+            messages: [
+                {
+                    role: 'user',
+                    content: req.body.prompt
+                }
+            ],
+            size: normalizeOpenAIImageVideoSize(req.body.size),
+            chat_type: 't2v',
+            stream: false
+        })
+
+        res.json({
+            id: `video_${new Date().getTime()}`,
+            object: 'video',
+            created: Math.floor(Date.now() / 1000),
+            model,
+            status: 'completed',
+            data: [
+                {
+                    url: result.contentUrl
+                }
+            ]
+        })
+    } catch (error) {
+        logger.error('OpenAI 视频生成端点处理失败', 'CHAT', '', error)
+        return sendOpenAIErrorResponse(res, error)
     }
 }
 
@@ -1347,5 +1880,8 @@ const getVideoTaskStatus = async (videoTaskID, token) => {
 }
 
 module.exports = {
-    handleImageVideoCompletion
+    handleImageVideoCompletion,
+    handleOpenAIImagesGeneration,
+    handleOpenAIImagesEdit,
+    handleOpenAIVideoGeneration
 }
