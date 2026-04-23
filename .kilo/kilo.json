@@ -1,0 +1,20 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "shrimp-task-manager": {
+      "type": "local",
+      "command": [
+        "cmd",
+        "/c",
+        "npx",
+        "-y",
+        "mcp-shrimp-task-manager"
+      ],
+      "environment": {
+        "DATA_DIR": "D:\\Work\\Project\\ToolProject\\Qwen2API\\shrimp-task-manager\\data",
+        "TEMPLATES_USE": "zh",
+        "ENABLE_GUI": "true"
+      }
+    }
+  }
+}

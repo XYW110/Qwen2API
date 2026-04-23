@@ -16,16 +16,18 @@
 
 ### 项目说明
 
-Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换为 OpenAI 兼容 API 的代理服务。通过本项目，您只需要一个账户，即可以使用任何支持 OpenAI API 的客户端（如 ChatGPT-Next-Web、LobeChat 等）来调用 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli`的各种模型。其中 `/cli` 端点下的模型由 `Qwen Code / Qwen Cli` 提供，支持256k上下文，原生 tools 参数支持
+Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换为 OpenAI 兼容 API 的代理服务。通过本项目，您只需要一个账户，即可以使用任何支持 OpenAI API 的客户端（如 ChatGPT-Next-Web、LobeChat 等）来调用 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli`的各种模型。其中 `/cli` 端点下的模型由 `Qwen Code / Qwen Cli` 提供，支持 256k 上下文，原生 tools 参数支持
 
 **主要特性：**
+
 - 兼容 OpenAI API 格式，无缝对接各类客户端
 - 支持多账户轮询，提高可用性
 - 支持流式/非流式响应
 - 支持多模态（图片识别、视频理解、图片/视频生成）
 - 支持 OpenAI 风格资源端点：`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`
 - 支持智能搜索、深度思考等高级功能
-- 支持 CLI 端点，提供 256K 上下文和工具调用能力
+- 支持 CLI 端点，提供 256K 上下文和原生工具调用能力
+- 支持 `/tools` 端点，通过提示词模拟方式实现工具调用（Function Calling）
 - 提供 Web 管理界面，方便配置和监控
 - 批量添加账号支持实时进度展示，可在系统设置中调整登录并发数
 
@@ -37,9 +39,9 @@ Qwen-Proxy 是一个将 `https://chat.qwen.ai` 和 `Qwen Code / Qwen Cli` 转换
 
 如需高并发使用，建议配合代理池实现 IP 轮换：
 
-| 方案 | 配置方式 | 说明 |
-|------|----------|------|
-| **方案一** | `PROXY_URL` + [ProxyFlow](https://github.com/Rfym21/ProxyFlow) | 直接配置代理地址，所有请求通过代理池轮换 IP |
+| 方案       | 配置方式                                                                                                                  | 说明                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| **方案一** | `PROXY_URL` + [ProxyFlow](https://github.com/Rfym21/ProxyFlow)                                                            | 直接配置代理地址，所有请求通过代理池轮换 IP |
 | **方案二** | `QWEN_CHAT_PROXY_URL` + [UrlProxy](https://github.com/Rfym21/UrlProxy) + [ProxyFlow](https://github.com/Rfym21/ProxyFlow) | 通过反代 + 代理池组合，实现更灵活的 IP 轮换 |
 
 **配置示例：**
@@ -97,39 +99,41 @@ CACHE_MODE=default            # 图片缓存模式 (default/file)
 
 #### 📋 配置说明
 
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `LISTEN_ADDRESS` | 服务监听地址 | `localhost` 或 `0.0.0.0` |
-| `SERVICE_PORT` | 服务运行端口 | `3000` |
-| `API_KEY` | API 访问密钥，支持多密钥配置。第一个为管理员密钥（可访问前端管理页面），其他为普通密钥（仅可调用API）。多个密钥用逗号分隔 | `sk-admin123,sk-user456,sk-user789` |
-| `PM2_INSTANCES` | PM2进程数量 | `1`/`4`/`max` |
-| `PM2_MAX_MEMORY` | PM2内存限制 | `100M`/`1G`/`2G` |
-| `SEARCH_INFO_MODE` | 搜索结果展示格式 | `table` 或 `text` |
-| `OUTPUT_THINK` | 是否显示 AI 思考过程 | `true` 或 `false` |
-| `SIMPLE_MODEL_MAP` | 简化模型映射，只返回基础模型不包含变体 | `true` 或 `false` |
-| `QWEN_CHAT_PROXY_URL` | 自定义 Chat API 反代地址 | `https://your-proxy.com` |
-| `QWEN_CLI_PROXY_URL` | 自定义 CLI API 反代地址 | `https://your-cli-proxy.com` |
-| `PROXY_URL` | 出站请求代理地址，支持 HTTP/HTTPS/SOCKS5 | `http://127.0.0.1:7890` |
-| `DATA_SAVE_MODE` | 数据持久化方式 | `none`/`file`/`redis` |
-| `REDIS_URL` | Redis 数据库连接地址，使用TLS加密时需使用 `rediss://` 协议 | `redis://localhost:6379` 或 `rediss://xxx.upstash.io` |
-| `BATCH_LOGIN_CONCURRENCY` | 批量添加账号时的登录并发数，可在前端系统设置中动态调整 | `5` |
-| `CACHE_MODE` | 图片缓存存储方式 | `default`/`file` |
-| `LOG_LEVEL` | 日志级别 | `DEBUG`/`INFO`/`WARN`/`ERROR` |
-| `ENABLE_FILE_LOG` | 是否启用文件日志 | `true` 或 `false` |
-| `LOG_DIR` | 日志文件目录 | `./logs` |
-| `MAX_LOG_FILE_SIZE` | 最大日志文件大小(MB) | `10` |
-| `MAX_LOG_FILES` | 保留的日志文件数量 | `5` |
+| 参数                      | 说明                                                                                                                       | 示例                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `LISTEN_ADDRESS`          | 服务监听地址                                                                                                               | `localhost` 或 `0.0.0.0`                              |
+| `SERVICE_PORT`            | 服务运行端口                                                                                                               | `3000`                                                |
+| `API_KEY`                 | API 访问密钥，支持多密钥配置。第一个为管理员密钥（可访问前端管理页面），其他为普通密钥（仅可调用 API）。多个密钥用逗号分隔 | `sk-admin123,sk-user456,sk-user789`                   |
+| `PM2_INSTANCES`           | PM2 进程数量                                                                                                               | `1`/`4`/`max`                                         |
+| `PM2_MAX_MEMORY`          | PM2 内存限制                                                                                                               | `100M`/`1G`/`2G`                                      |
+| `SEARCH_INFO_MODE`        | 搜索结果展示格式                                                                                                           | `table` 或 `text`                                     |
+| `OUTPUT_THINK`            | 是否显示 AI 思考过程                                                                                                       | `true` 或 `false`                                     |
+| `SIMPLE_MODEL_MAP`        | 简化模型映射，只返回基础模型不包含变体                                                                                     | `true` 或 `false`                                     |
+| `QWEN_CHAT_PROXY_URL`     | 自定义 Chat API 反代地址                                                                                                   | `https://your-proxy.com`                              |
+| `QWEN_CLI_PROXY_URL`      | 自定义 CLI API 反代地址                                                                                                    | `https://your-cli-proxy.com`                          |
+| `PROXY_URL`               | 出站请求代理地址，支持 HTTP/HTTPS/SOCKS5                                                                                   | `http://127.0.0.1:7890`                               |
+| `DATA_SAVE_MODE`          | 数据持久化方式                                                                                                             | `none`/`file`/`redis`                                 |
+| `REDIS_URL`               | Redis 数据库连接地址，使用 TLS 加密时需使用 `rediss://` 协议                                                               | `redis://localhost:6379` 或 `rediss://xxx.upstash.io` |
+| `BATCH_LOGIN_CONCURRENCY` | 批量添加账号时的登录并发数，可在前端系统设置中动态调整                                                                     | `5`                                                   |
+| `CACHE_MODE`              | 图片缓存存储方式                                                                                                           | `default`/`file`                                      |
+| `LOG_LEVEL`               | 日志级别                                                                                                                   | `DEBUG`/`INFO`/`WARN`/`ERROR`                         |
+| `ENABLE_FILE_LOG`         | 是否启用文件日志                                                                                                           | `true` 或 `false`                                     |
+| `LOG_DIR`                 | 日志文件目录                                                                                                               | `./logs`                                              |
+| `MAX_LOG_FILE_SIZE`       | 最大日志文件大小(MB)                                                                                                       | `10`                                                  |
+| `MAX_LOG_FILES`           | 保留的日志文件数量                                                                                                         | `5`                                                   |
 
 > 💡 **提示**: 可以在 [Upstash](https://upstash.com/) 免费创建 Redis 实例，使用 TLS 协议时地址格式为 `rediss://...`
+
 <div>
 <img src="./docs/images/upstash.png" alt="Upstash Redis" width="600">
 </div>
 
-#### 🔑 多API_KEY配置说明
+#### 🔑 多 API_KEY 配置说明
 
-`API_KEY` 环境变量支持配置多个API密钥，用于实现不同权限级别的访问控制：
+`API_KEY` 环境变量支持配置多个 API 密钥，用于实现不同权限级别的访问控制：
 
 **配置格式:**
+
 ```bash
 # 单个密钥（管理员权限）
 API_KEY=sk-admin123
@@ -140,36 +144,40 @@ API_KEY=sk-admin123,sk-user456,sk-user789
 
 **权限说明:**
 
-| 密钥类型 | 权限范围 | 功能描述 |
-|----------|----------|----------|
-| **管理员密钥** | 完整权限 | • 访问前端管理页面<br>• 修改系统设置<br>• 调用所有API接口<br>• 添加/删除普通密钥 |
-| **普通密钥** | API调用权限 | • 仅可调用API接口<br>• 无法访问前端管理页面<br>• 无法修改系统设置 |
+| 密钥类型       | 权限范围     | 功能描述                                                                           |
+| -------------- | ------------ | ---------------------------------------------------------------------------------- |
+| **管理员密钥** | 完整权限     | • 访问前端管理页面<br>• 修改系统设置<br>• 调用所有 API 接口<br>• 添加/删除普通密钥 |
+| **普通密钥**   | API 调用权限 | • 仅可调用 API 接口<br>• 无法访问前端管理页面<br>• 无法修改系统设置                |
 
 **使用场景:**
-- **团队协作**: 为不同团队成员分配不同权限的API密钥
-- **应用集成**: 为第三方应用提供受限的API访问权限
+
+- **团队协作**: 为不同团队成员分配不同权限的 API 密钥
+- **应用集成**: 为第三方应用提供受限的 API 访问权限
 - **安全隔离**: 将管理权限与普通使用权限分离
 
 **注意事项:**
-- 第一个API_KEY自动成为管理员密钥，拥有最高权限
+
+- 第一个 API_KEY 自动成为管理员密钥，拥有最高权限
 - 管理员可以通过前端页面动态添加或删除普通密钥
-- 所有密钥都可以正常调用API接口，权限差异仅体现在管理功能上
+- 所有密钥都可以正常调用 API 接口，权限差异仅体现在管理功能上
 
 #### 📸 CACHE_MODE 缓存模式说明
 
 `CACHE_MODE` 环境变量控制图片缓存的存储方式，用于优化图片上传和处理性能：
 
-| 模式 | 说明 | 适用场景 |
-|------|------|----------|
-| `default` | 内存缓存模式 (默认) | 单进程部署，重启后缓存丢失 |
-| `file` | 文件缓存模式 | 多进程部署，缓存持久化到 `./caches/` 目录 |
+| 模式      | 说明                | 适用场景                                  |
+| --------- | ------------------- | ----------------------------------------- |
+| `default` | 内存缓存模式 (默认) | 单进程部署，重启后缓存丢失                |
+| `file`    | 文件缓存模式        | 多进程部署，缓存持久化到 `./caches/` 目录 |
 
 **推荐配置:**
+
 - **单进程部署**: 使用 `CACHE_MODE=default`，性能最佳
 - **多进程/集群部署**: 使用 `CACHE_MODE=file`，确保进程间缓存共享
 - **Docker 部署**: 建议使用 `CACHE_MODE=file` 并挂载 `./caches` 目录
 
 **文件缓存目录结构:**
+
 ```
 caches/
 ├── [signature1].txt    # 缓存文件，包含图片URL
@@ -283,6 +291,7 @@ Qwen2API/
 │   │   ├── chat.js                  # 聊天控制器
 │   │   ├── chat.image.video.js      # 图片/视频生成控制器
 │   │   ├── cli.chat.js              # CLI聊天控制器
+│   │   ├── tools.chat.js            # 工具调用控制器（提示词模拟）
 │   │   └── models.js                # 模型控制器
 │   ├── middlewares/                 # 中间件目录
 │   │   ├── authorization.js         # 授权中间件
@@ -293,6 +302,7 @@ Qwen2API/
 │   │   ├── accounts.js              # 账户路由
 │   │   ├── chat.js                  # 聊天路由
 │   │   ├── cli.chat.js              # CLI聊天路由
+│   │   ├── tools.chat.js            # 工具调用路由（提示词模拟）
 │   │   ├── models.js                # 模型路由
 │   │   ├── settings.js              # 设置路由
 │   │   └── verify.js                # 验证路由
@@ -313,7 +323,8 @@ Qwen2API/
 │       ├── setting.js               # 设置管理
 │       ├── ssxmod-manager.js        # ssxmod参数管理
 │       ├── token-manager.js         # Token管理器
-│       ├── tools.js                 # 工具调用处理
+│       ├── tools.js                 # 通用工具函数
+│       ├── tools-simulator.js       # 工具调用模拟器（提示词模拟）
 │       └── upload.js                # 文件上传
 │
 └── public/                          # 前端项目目录
@@ -347,17 +358,19 @@ Qwen2API/
 
 ### 🔐 API 认证说明
 
-本API支持多密钥认证机制，所有API请求都需要在请求头中包含有效的API密钥：
+本 API 支持多密钥认证机制，所有 API 请求都需要在请求头中包含有效的 API 密钥：
 
 ```http
 Authorization: Bearer sk-your-api-key
 ```
 
 **支持的密钥类型:**
-- **管理员密钥**: 第一个配置的API_KEY，拥有完整权限
-- **普通密钥**: 其他配置的API_KEY，仅可调用API接口
+
+- **管理员密钥**: 第一个配置的 API_KEY，拥有完整权限
+- **普通密钥**: 其他配置的 API_KEY，仅可调用 API 接口
 
 **认证示例:**
+
 ```bash
 # 使用管理员密钥
 curl -H "Authorization: Bearer sk-admin123" http://localhost:3000/v1/models
@@ -380,6 +393,7 @@ GET /models (免认证)
 ```
 
 **说明:**
+
 - `id`: 推荐直接作为请求里的 `model` 使用，优先展示更易读的模型名称
 - `name`: 上游原始模型 ID，便于与官方接口或日志对照
 - `upstream_id`: 不带能力后缀的上游模型 ID
@@ -387,6 +401,7 @@ GET /models (免认证)
 - 当 `SIMPLE_MODEL_MAP=false` 时，会额外返回 `-thinking`、`-search`、`-image`、`-video`、`-image-edit` 等能力变体
 
 **响应示例:**
+
 ```json
 {
   "object": "list",
@@ -415,6 +430,7 @@ Authorization: Bearer sk-your-api-key
 ```
 
 **请求体:**
+
 ```json
 {
   "model": "Qwen3.6-Plus",
@@ -435,6 +451,7 @@ Authorization: Bearer sk-your-api-key
 ```
 
 **响应示例:**
+
 ```json
 {
   "id": "chatcmpl-123",
@@ -462,6 +479,7 @@ Authorization: Bearer sk-your-api-key
 ### 🎨 图像与视频生成
 
 当前支持两种调用方式：
+
 - 使用 `/v1/chat/completions` + 模型后缀：`-image`、`-image-edit`、`-video`
 - 使用 OpenAI 风格资源端点：`/v1/images/generations`、`/v1/images/edits`、`/v1/videos`
 
@@ -528,6 +546,7 @@ Authorization: Bearer sk-your-api-key
 ```
 
 **支持的尺寸参数:**
+
 - `/v1/chat/completions` 下的图片/视频生成支持 `1:1`、`4:3`、`3:4`、`16:9`、`9:16`
 - `/v1/images/generations`、`/v1/images/edits`、`/v1/videos` 兼容 `1024x1024`、`1536x1024`、`1024x1536`、`1792x1024`、`1024x1792`
 
@@ -559,6 +578,7 @@ Authorization: Bearer sk-your-api-key
 ```
 
 表单字段：
+
 - `model`: 可选，不传时自动选择支持图片编辑的默认模型
 - `prompt`: 可选，默认为 `请基于上传图片完成编辑`
 - `image`: 必填，支持 multipart 文件上传，也支持 JSON 字符串形式的图片 URL / data URI
@@ -701,22 +721,23 @@ API 自动处理图片和视频上传，支持在对话中发送图片、视频 
 ```
 
 支持的视频字段：
+
 - `input_video`
 - `video_url`
 - `video`
 
 ### 🖥️ CLI 端点
 
-CLI 端点使用 Qwen Code / Qwen Cli 的 OAuth 令牌访问，支持 256K 上下文和工具调用（Function Calling）。
+CLI 端点使用 Qwen Code / Qwen Cli 的 OAuth 令牌访问，支持 256K 上下文和原生工具调用（Function Calling）。
 
 **支持的模型：**
 
-| 模型 ID | 说明 |
-|---------|------|
-| `qwen3-coder-plus` | Qwen3 Coder Plus |
-| `qwen3-coder-flash` | Qwen3 Coder Flash（速度更快） |
-| `coder-model` | Qwen 3.5 Plus（带思维链，256K 上下文） |
-| `qwen3.5-plus` | `coder-model` 的别名，自动重定向 |
+| 模型 ID             | 说明                                   |
+| ------------------- | -------------------------------------- |
+| `qwen3-coder-plus`  | Qwen3 Coder Plus                       |
+| `qwen3-coder-flash` | Qwen3 Coder Flash（速度更快）          |
+| `coder-model`       | Qwen 3.5 Plus（带思维链，256K 上下文） |
+| `qwen3.5-plus`      | `coder-model` 的别名，自动重定向       |
 
 #### 💬 CLI 聊天对话
 
@@ -729,6 +750,7 @@ Authorization: Bearer API_KEY
 ```
 
 **请求体:**
+
 ```json
 {
   "model": "qwen3-coder-plus",
@@ -745,6 +767,7 @@ Authorization: Bearer API_KEY
 ```
 
 使用 `coder-model`（即 Qwen 3.5 Plus）或其别名 `qwen3.5-plus`：
+
 ```json
 {
   "model": "coder-model",
@@ -759,6 +782,7 @@ Authorization: Bearer API_KEY
 ```
 
 **流式请求:**
+
 ```json
 {
   "model": "qwen3-coder-flash",
@@ -775,6 +799,7 @@ Authorization: Bearer API_KEY
 **响应格式:**
 
 非流式响应与标准 OpenAI API 格式相同：
+
 ```json
 {
   "id": "chatcmpl-123",
@@ -800,10 +825,212 @@ Authorization: Bearer API_KEY
 ```
 
 流式响应使用 Server-Sent Events (SSE) 格式：
+
 ```
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"qwen3-coder-flash","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
 
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1677652288,"model":"qwen3-coder-flash","choices":[{"index":0,"delta":{"content":"！"},"finish_reason":null}]}
 
 data: [DONE]
+```
+
+### 🔧 Tools 端点（提示词模拟工具调用）
+
+由于上游 `chat.qwen.ai` 已限制原生 `tools` 参数支持，`/cli` 端点暂时无法使用原生工具调用。`/tools` 端点通过**提示词模拟**方式实现工具调用（Function Calling），兼容 OpenAI 工具调用 API 格式。
+
+**工作原理：**
+
+1. 将 `tools` 定义转换为系统提示词中的工具描述
+2. 在 system 消息中注入工具使用说明（`<tool_call>` XML 标记格式）
+3. 模型输出包含 `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` 的响应
+4. 服务端解析响应文本，提取工具调用并转换为 OpenAI 兼容格式
+
+**适用场景：**
+
+- 需要在 `chat.qwen.ai` 模型上使用工具调用功能
+- 客户端（如 ChatGPT-Next-Web、LobeChat 等）需要 `tool_calls` 响应格式
+- `/cli` 端点因上游限制无法使用时作为替代方案
+
+**与 `/cli` 端点的区别：**
+
+| 特性         | `/cli` 端点          | `/tools` 端点          |
+| ------------ | -------------------- | ---------------------- |
+| 工具调用方式 | 原生 `tools` 参数    | 提示词模拟             |
+| 上下文长度   | 256K                 | 与主聊天相同           |
+| 模型来源     | Qwen Code / Qwen Cli | chat.qwen.ai           |
+| 可用性       | 受上游限制可能不可用 | 始终可用               |
+| 工具调用精度 | 高（原生支持）       | 依赖模型遵循提示词能力 |
+
+#### 🔧 Tools 聊天对话
+
+```http
+POST /tools/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer API_KEY
+```
+
+**请求体（非流式）：**
+
+```json
+{
+  "model": "Qwen3.6-Plus",
+  "messages": [
+    {
+      "role": "user",
+      "content": "北京天气如何？"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "获取指定城市的天气信息",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "城市名称"
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "stream": false
+}
+```
+
+**非流式响应（工具调用）：**
+
+```json
+{
+  "id": "chatcmpl-xxx",
+  "object": "chat.completion",
+  "created": 1234567890,
+  "model": "qwen3.6-plus",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_000000000",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"北京\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 50,
+    "completion_tokens": 20,
+    "total_tokens": 70
+  }
+}
+```
+
+**流式响应（SSE）：**
+
+```
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"choices":[{"index":0,"delta":{"content":"Let me check"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_000000000","type":"function","function":{"name":"get_weather","arguments":"{\"location\": \"北京\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234567890,"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}
+
+data: [DONE]
+```
+
+#### 🔧 tool_choice 参数说明
+
+| 值                                                  | 说明                       | 注入的提示词                                                  |
+| --------------------------------------------------- | -------------------------- | ------------------------------------------------------------- |
+| `auto`                                              | 仅在必要时使用工具（默认） | `Note: Use tools only when necessary.`                        |
+| `none`                                              | 禁止使用工具               | `Note: You must NOT use any tools for this request.`          |
+| `required`                                          | 必须使用工具               | `Note: You MUST use a tool for this request.`                 |
+| `特定函数名`                                        | 强制使用指定工具           | `Note: You MUST use the \`func_name\` tool for this request.` |
+| `{"type": "function", "function": {"name": "..."}}` | 强制使用指定工具           | 同上                                                          |
+
+**请求示例（强制使用工具）：**
+
+```json
+{
+  "model": "Qwen3.6-Plus",
+  "messages": [
+    {
+      "role": "user",
+      "content": "搜索一下最新的 Node.js 版本"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_web",
+        "description": "搜索网页信息",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "tool_choice": "required",
+  "stream": false
+}
+```
+
+#### 🔧 工具结果回传
+
+获取到 `tool_calls` 后，执行工具函数并将结果通过 `role: "tool"` 消息回传：
+
+```json
+{
+  "model": "Qwen3.6-Plus",
+  "messages": [
+    {
+      "role": "user",
+      "content": "北京天气如何？"
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_000000000",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\": \"北京\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_000000000",
+      "content": "北京今天晴，25°C，微风"
+    }
+  ],
+  "tools": [...],
+  "stream": false
+}
 ```
